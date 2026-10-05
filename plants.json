@@ -1,0 +1,12 @@
+{
+  "plants": [
+    {
+      "id": "1700",
+      "name": "Novus Foods Plant 1700",
+      "shortLabel": "Plant 1700",
+      "location": "",
+      "dataUrl": "dashboard-data.json",
+      "lines": []
+    }
+  ]
+}
