@@ -5,15 +5,29 @@
   <title>DDS Dashboard – Novus Foods Ops Hub</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400&family=JetBrains+Mono:wght@400;500&family=Permanent+Marker&display=swap" rel="stylesheet">
+  <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Inter:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400&family=JetBrains+Mono:wght@400;500&family=Permanent+Marker&display=swap" onload="this.onload=null;this.rel='stylesheet'">
+  <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:ital,wght@0,400;0,500;0,600;0,700;0,800;1,400&family=JetBrains+Mono:wght@400;500&family=Permanent+Marker&display=swap"></noscript>
+  <link rel="preconnect" href="https://cdn.jsdelivr.net">
   <link rel="stylesheet" href="novus-styles.css">
-  <script src="sharepoint-config.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
-  <script src="supabase-config.js"></script>
-  <script src="novus-core.js"></script>
+  <!-- Deferred (run in order, after the page is parsed, before DOMContentLoaded) so they
+       never block first paint. sharepoint-config.js was removed: nothing on this page
+       uses NovusSP any more and it pulled in the MSAL login library on every visit. -->
+  <script defer src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/dist/umd/supabase.js"></script>
+  <script defer src="supabase-config.js"></script>
+  <script defer src="novus-core.js"></script>
   <script>
     window.__libs={chartjs:false};
-    function _checkLibsReady(){if(window.__libs.chartjs&&window.__libsCallback)window.__libsCallback();}
+    window.__afterDeferred=fn=>{if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',fn);else fn();};
+    // Starts the dashboard exactly ONCE, and only when Chart.js and the page itself
+    // (including the deferred scripts) are both ready. It used to run once per library
+    // onload plus once on DOMContentLoaded -- up to three full loads, renders and
+    // data fetches per visit.
+    function _checkLibsReady(){
+      if(window.__libsStarted||!window.__libs.chartjs||!window.__domReady||!window.__libsCallback)return;
+      window.__libsStarted=true;window.__libsCallback();
+    }
+    if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>{window.__domReady=true;_checkLibsReady();});
+    else window.__domReady=true;
   </script>
   <script>
     // ── Multi-plant config ──────────────────────────────────────────────
@@ -65,10 +79,19 @@
       const label = document.querySelector('.psb-plant-label');
       if(label) label.textContent = plant.shortLabel || plant.name;
     }
+
+    // Start downloading the dashboard data NOW, in parallel with the CDN scripts, instead of
+    // waiting until Chart.js has loaded. fetchFromSharePoint() picks this up on the first
+    // load only (one-shot); the Refresh button and auto-refresh always fetch fresh.
+    window.__earlyData = window.PLANTS_CONFIG_PROMISE.then(async () => {
+      const plant = await resolveActivePlant();
+      const r = await fetch(plant.dataUrl + '?v=' + Date.now(), { cache: 'no-cache' });
+      return r.ok ? { plantId: plant.id, json: await r.json() } : null;
+    }).catch(() => null);
   </script>
-  <script async src="https://cdn.jsdelivr.net/npm/chart.js" onload="window.__libs.chartjs=true;_checkLibsReady()"></script>
-  <script async src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js" onload="window.__libs.xlsx=true;_checkLibsReady()"></script>
-  <script async src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js"></script>
+  <script async src="https://cdn.jsdelivr.net/npm/chart.js@4.5.1/dist/chart.umd.js" onload="window.__libs.chartjs=true;_checkLibsReady()"></script>
+  <!-- xlsx.full.min.js (~900 KB) is only needed for the manual "Upload XLSX" button; see ensureXLSX() -->
+  <script async src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js" onload="if(window.__dashRendered&&window.initDraggable)initDraggable()"></script>
   <style>
     /* ── Level 1 DDS Highlights ── */
     .highlights-grid {
@@ -675,6 +698,83 @@ function toDS(d){if(!d||isNaN(d.getTime()))return null;return`${d.getUTCFullYear
 function yesterdayStr(){const t=new Date();t.setDate(t.getDate()-1);return`${t.getFullYear()}-${p2(t.getMonth()+1)}-${p2(t.getDate())}`;}
 function parseDate(val){if(val==null||val==='')return null;const n=Number(val);if(!isNaN(n)&&val!=='')return new Date((n-25569)*86400*1000);const d=new Date(val);return isNaN(d.getTime())?null:new Date(Date.UTC(d.getFullYear(),d.getMonth(),d.getDate()));}
 function valByKey(row,field){if(!row)return null;const key=Object.keys(row).find(k=>k.trim().toLowerCase()===field.toLowerCase()||k.trim().toLowerCase().replace(/\s/g,'')===field.toLowerCase().replace(/\s/g,''));const v=row[key??field];if(v===''||v==null||String(v).includes('#')||v==='DNR')return null;return v;}
+// ── Raw L2L Production rows ────────────────────────────────────────────────
+// A plant whose workbook pulls L2L straight in (no reshaping) publishes
+// Production rows with L2L's own column names: date, line,
+// overall_equipment_effectiveness, downtime_minutes, nonproduction_minutes
+// plus ~40 others the dashboard never reads. This maps those onto the names
+// the dashboard reads (Date, Line, OEE, Downtime), drops the unused columns,
+// and -- only when it actually converted raw rows (default 90 days) or
+// plants.json sets "maxDays" for the plant -- keeps just the last N days,
+// counted back from the sheet's own latest date. Rows already using
+// Date/Line/OEE/Downtime pass through untouched (trimmed only if maxDays is set).
+// Downtime = downtime_minutes minus nonproduction_minutes (never below 0).
+function normalizeProductionRows(rows, maxDays){
+  if(!Array.isArray(rows)) return {rows:[], converted:false};
+  const num=v=>{if(v==null||v==='')return null;const n=Number(v);return isNaN(n)?null:n;};
+  let converted=false;
+  let out=rows.map(r=>{
+    if(!r||typeof r!=='object') return r;
+    const l2l=('line_id' in r)||('overall_equipment_effectiveness' in r);
+    const lowerOnly=('date' in r)&&!('Date' in r);
+    if(!l2l&&!lowerOnly) return r;
+    const down=num(r.downtime_minutes), non=num(r.nonproduction_minutes)||0;
+    const mapped={
+      Date: r.Date!=null?r.Date:r.date,
+      Line: r.Line!=null?r.Line:r.line,
+      OEE: r.OEE!=null?r.OEE:num(r.overall_equipment_effectiveness),
+      Downtime: r.Downtime!=null?r.Downtime:(down==null?null:Math.max(down-non,0))
+    };
+    if(r.area!=null&&String(r.area).trim()!=='') mapped.Area=String(r.area).trim();
+    if(l2l){converted=true;return mapped;}
+    converted=true;
+    return Object.assign({},r,mapped);
+  });
+  const days=(maxDays!=null&&!isNaN(maxDays))?maxDays:(converted?90:0);
+  if(days>0){
+    const limit=new Date();limit.setDate(limit.getDate()+7);
+    let maxT=0;
+    out.forEach(r=>{const d=parseDate(r&&r.Date);if(d&&!isNaN(d.getTime())&&d<limit&&d.getTime()>maxT)maxT=d.getTime();});
+    if(maxT){
+      const cut=maxT-days*86400000;
+      out=out.filter(r=>{const d=parseDate(r&&r.Date);return !d||isNaN(d.getTime())||d.getTime()>=cut;});
+    }
+  }
+  return {rows:out, converted};
+}
+// Lines to list when plants.json gives no `lines` for the plant: every
+// distinct Line value found in the Production sheet, upper-cased (the
+// per-line lookup compares upper-case), in natural order (LINE2 before LINE10).
+function deriveLines(prod){
+  const s=new Set();
+  (prod||[]).forEach(r=>{const v=valByKey(r,'Line');if(v!=null&&String(v).trim()!=='')s.add(String(v).trim().toUpperCase());});
+  return [...s].sort((a,b)=>a.localeCompare(b,undefined,{numeric:true}));
+}
+// ── Group the line table by area ───────────────────────────────────────────
+// L2L rows carry an `area` (e.g. "1600 North", "1600 South", "1700"). The
+// normaliser keeps it as `Area`; these helpers turn it into table sections.
+// Plants whose data has no area (or only one) get the flat table as before.
+function lineAreaMap(prod){
+  const m={};
+  (prod||[]).forEach(r=>{
+    const a=valByKey(r,'Area'),l=valByKey(r,'Line');
+    if(a!=null&&String(a).trim()!==''&&l!=null&&String(l).trim()!=='') m[String(l).trim().toUpperCase()]=String(a).trim();
+  });
+  return m;
+}
+function groupLinesByArea(lines,areaMap,firstArea){
+  const by={};
+  lines.forEach(l=>{const a=areaMap[String(l).trim().toUpperCase()]||'Other';(by[a]=by[a]||[]).push(l);});
+  const names=Object.keys(by);
+  if(names.filter(n=>n!=='Other').length<2) return null;
+  names.sort((a,b)=>{
+    if(a===firstArea) return -1; if(b===firstArea) return 1;
+    if(a==='Other') return 1;    if(b==='Other') return -1;
+    return a.localeCompare(b,undefined,{numeric:true});
+  });
+  return names.map(n=>({area:n,lines:by[n]}));
+}
+function escHtml(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 function getLatestDate(data,reqField=null){let max=0;const limit=new Date();limit.setDate(limit.getDate()+7);data.forEach(row=>{const d=parseDate(row.Date);if(!d||isNaN(d.getTime())||d>=limit)return;if(reqField&&(valByKey(row,reqField)==null||valByKey(row,reqField)===''))return;if(d.getTime()>max)max=d.getTime();});if(!max)return null;const obj=new Date(max);return{str:toDS(obj),obj};}
 function setDateEl(id,result){const el=document.getElementById(id);if(!el)return null;if(!result){el.textContent='No Data';el.classList.add('stale');return null;}if(!GLOBAL_MAX_DATE||result.str>GLOBAL_MAX_DATE)GLOBAL_MAX_DATE=result.str;const d=new Date(result.obj.getUTCFullYear(),result.obj.getUTCMonth(),result.obj.getUTCDate());el.textContent=`Data: ${d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}`;return result.str;}
 function checkStale(id,ds){if(!GLOBAL_MAX_DATE||!ds)return;const el=document.getElementById(id);if(!el)return;if(ds<GLOBAL_MAX_DATE){const mD=new Date(GLOBAL_MAX_DATE),sD=new Date(ds),diff=Math.ceil(Math.abs(mD-sD)/864e5);if(mD.getUTCDay()===1&&sD.getUTCDay()===5&&diff<=3)return;el.classList.add('stale');el.textContent+=' ⚠';}else el.classList.remove('stale');}
@@ -791,15 +891,25 @@ function renderDashboard(){
   // Production tables
   function buildProdSection(lines,tbodyId,readId){
     const tbody=document.getElementById(tbodyId),grid=document.getElementById(readId);tbody.innerHTML='';grid.innerHTML='';
-    lines.forEach(line=>{
+    const addLine=line=>{
       const m=getProdMetrics(prod,apiDs,paDs,line);
       const oeeN=m.oee!=null?(Number(m.oee)<=2?Number(m.oee):Number(m.oee)/100):null;
       const cls=oeeN==null?'':oeeN<=.60?'td-red':oeeN<.65?'td-amber':'td-green';
       const tr=document.createElement('tr');tr.innerHTML=`<td style="font-weight:700">${line}</td><td class="${cls}">${pct(m.oee)}</td><td>${pct(m.att,1)}</td><td>${m.dt!=null?m.dt.toFixed(0)+'m':'—'}</td>`;tbody.appendChild(tr);
       const card=document.createElement('div');card.className='readiness-card';card.innerHTML=`<div class="readiness-line">${line}</div><div class="status-pill ${m.startup==='Yes'?'pill-yes':'pill-no'}"><span class="pill-label">STARTUP</span><span>${m.startup==='Yes'?'✓':'✗'}</span></div><div class="status-pill ${m.cil==='Yes'?'pill-yes':'pill-no'}"><span class="pill-label">CIL</span><span>${m.cil==='Yes'?'✓':'✗'}</span></div>`;grid.appendChild(card);
-    });
+    };
+    const grp=groupLinesByArea(lines,lineAreaMap(prod),(window.ACTIVE_PLANT&&window.ACTIVE_PLANT.id)||'');
+    if(grp){
+      grp.forEach(g=>{
+        const hr=document.createElement('tr');hr.className='area-row';
+        hr.innerHTML=`<td colspan="4" style="text-align:left;font-size:.68rem;font-weight:800;letter-spacing:.06em;text-transform:uppercase;background:rgba(0,0,0,.05);padding:6px 10px">${escHtml(g.area)} <span style="opacity:.6;font-weight:600">· ${g.lines.length} line${g.lines.length===1?'':'s'}</span></td>`;tbody.appendChild(hr);
+        const lb=document.createElement('div');lb.className='col-label';lb.style.margin='6px 0 0';lb.textContent=g.area;grid.appendChild(lb);
+        g.lines.forEach(addLine);
+      });
+    } else lines.forEach(addLine);
   }
-  buildProdSection((window.ACTIVE_PLANT&&window.ACTIVE_PLANT.lines)||[],'tbody-lines','readiness-lines');
+  const cfgLines=(window.ACTIVE_PLANT&&window.ACTIVE_PLANT.lines)||[];
+  buildProdSection(cfgLines.length?cfgLines:deriveLines(prod),'tbody-lines','readiness-lines');
   // Top drivers -- Power-Automate-authored text field, always the latest PA day
   const counts={};prod.filter(r=>toDS(parseDate(r.Date))===paDs).forEach(r=>{['Mechanical Downtime Drivers','Material Downtime Drivers'].forEach(col=>{const v=r[col];if(v&&v!=='DNR'&&v!=='None'&&v!=='')String(v).split(/[;,]/).forEach(d=>{const c=d.trim();if(c.length>2)counts[c]=(counts[c]||0)+1;});});});
   const tdEl=document.getElementById('top-drivers');if(tdEl)tdEl.textContent=Object.entries(counts).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([n,c])=>`• ${n} (${c})`).join('\n')||`No drivers reported.`;
@@ -967,7 +1077,8 @@ function updatePlantStatusBar(){
     crEl.style.color=codeRed>1?'var(--red)':codeRed===1?'var(--amber-l)':'inherit';
   }
 
-  const plantLines=(window.ACTIVE_PLANT&&window.ACTIVE_PLANT.lines)||[];
+  const cfgPlantLines=(window.ACTIVE_PLANT&&window.ACTIVE_PLANT.lines)||[];
+  const plantLines=cfgPlantLines.length?cfgPlantLines:deriveLines(prod);
   const lnEl=document.getElementById('psb-lines');
   if(lnEl) lnEl.textContent=activeLines.length?`${activeLines.length} / ${plantLines.length}`:'—';
 }
@@ -1081,16 +1192,25 @@ async function fetchFromSharePoint(){
     // every load a distinct URL, so there's nothing cached to serve.
     if(!window.ACTIVE_PLANT) await resolveActivePlant();
     const plant = window.ACTIVE_PLANT;
-    const res = await fetch(
-      plant.dataUrl + '?v=' + Date.now(),
-      { cache: 'no-cache' }
-    );
-    if(!res.ok) throw new Error(plant.shortLabel + ': dashboard data not found (' + res.status + '). Run your Power Automate flow first.');
-    const json = await res.json();
+    let json = null;
+    const early = window.__earlyData; window.__earlyData = null;   // one-shot: first load only
+    if(early){ const e = await early; if(e && e.plantId === plant.id) json = e.json; }
+    if(!json){
+      const res = await fetch(
+        plant.dataUrl + '?v=' + Date.now(),
+        { cache: 'no-cache' }
+      );
+      if(!res.ok) throw new Error(plant.shortLabel + ': dashboard data not found (' + res.status + '). Run your Power Automate flow first.');
+      json = await res.json();
+    }
     _dashData = {};
     Object.keys(json).forEach(k => {
       if(k !== 'synced_at') _dashData[k] = json[k];
     });
+    if(Array.isArray(_dashData['Production'])){
+      const np = normalizeProductionRows(_dashData['Production'], plant.maxDays != null ? Number(plant.maxDays) : null);
+      _dashData['Production'] = np.rows;
+    }
 
     // Plants whose config has an l2lDataUrl (Plant 1730 only) get L2L OEE/
     // Downtime/Code Red/Code Yellow from a SEPARATE file that only the L2L
@@ -1124,13 +1244,13 @@ async function fetchFromSharePoint(){
       }
     }
 
-    // Admin-added custom metric cards / charts for this plant (see
-    // "Manage Custom Widgets" in the ··· menu). Loaded here so
-    // renderDashboard() below can draw them from fresh data right away.
-    await loadCustomWidgets();
-
     workbook = { _json: true };
+    window.__dashRendered = true;
     renderDashboard();
+    // Admin-added custom metric cards / charts for this plant (see "Manage Custom Widgets"
+    // in the menu). Loaded AFTER the first render so the dashboard never waits on a
+    // database round trip; they draw in as soon as they arrive.
+    loadCustomWidgets().then(() => { if(typeof renderCustomWidgets === 'function') renderCustomWidgets(); });
     updatePlantStatusBar();
     updateFreshnessBadge();
     applyRoleAccess();
@@ -1153,18 +1273,29 @@ async function fetchFromSharePoint(){
   }
 }
 
+// The Excel reader (~900 KB) is fetched only when someone actually uploads a workbook.
+function ensureXLSX(){
+  if(window.XLSX) return Promise.resolve();
+  return new Promise((resolve,reject)=>{
+    const s=document.createElement('script');
+    s.src='https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js';
+    s.onload=()=>resolve(); s.onerror=()=>reject(new Error('Could not load the Excel reader.'));
+    document.head.appendChild(s);
+  });
+}
 async function handleUpload(evt){
   const file=evt.target.files[0];if(!file)return;
   try{
     const buf=await NovusCore.WorkbookCache.save(file);
+    await ensureXLSX();
     applyBuffer(buf,file.name);
     setSpBar(`✓ Loaded from upload: ${file.name}`,'success',false);
     NovusCore.Toast.success('Workbook loaded ✓');
   }catch(err){NovusCore.Toast.error('Failed to read file.');}
 }
 
-function initDraggable(){new Sortable(document.getElementById('main-sortable'),{animation:200,handle:'.panel-header',ghostClass:'sortable-ghost'});}
-function initResizable(){document.querySelectorAll('#main-sortable .panel').forEach(panel=>{const r=panel.querySelector('.resizer');if(!r)return;r.addEventListener('mousedown',e=>{e.preventDefault();const sx=e.pageX,sy=e.pageY,sw=panel.offsetWidth,sh=panel.offsetHeight,colW=document.querySelector('.dash-grid').getBoundingClientRect().width/12;function mv(e){panel.style.width=`${sw+(e.pageX-sx)}px`;panel.style.height=`${sh+(e.pageY-sy)}px`;}function up(e){window.removeEventListener('mousemove',mv);window.removeEventListener('mouseup',up);const cols=Math.max(2,Math.min(12,Math.round((sw+(e.pageX-sx))/colW)));panel.style.gridColumn=`span ${cols}`;panel.style.width='';panel.style.height='';window.dispatchEvent(new Event('resize'));}window.addEventListener('mousemove',mv);window.addEventListener('mouseup',up);});});}
+function initDraggable(){if(window.__sortableInit||!window.Sortable)return;window.__sortableInit=true;new Sortable(document.getElementById('main-sortable'),{animation:200,handle:'.panel-header',ghostClass:'sortable-ghost'});}
+function initResizable(){document.querySelectorAll('#main-sortable .panel').forEach(panel=>{const r=panel.querySelector('.resizer');if(!r||r.dataset.rszInit)return;r.dataset.rszInit='1';r.addEventListener('mousedown',e=>{e.preventDefault();const sx=e.pageX,sy=e.pageY,sw=panel.offsetWidth,sh=panel.offsetHeight,colW=document.querySelector('.dash-grid').getBoundingClientRect().width/12;function mv(e){panel.style.width=`${sw+(e.pageX-sx)}px`;panel.style.height=`${sh+(e.pageY-sy)}px`;}function up(e){window.removeEventListener('mousemove',mv);window.removeEventListener('mouseup',up);const cols=Math.max(2,Math.min(12,Math.round((sw+(e.pageX-sx))/colW)));panel.style.gridColumn=`span ${cols}`;panel.style.width='';panel.style.height='';window.dispatchEvent(new Event('resize'));}window.addEventListener('mousemove',mv);window.addEventListener('mouseup',up);});});}
 
 window.__libsCallback=async()=>{
   // Resolve which plant is active before anything else touches data --
@@ -1188,6 +1319,7 @@ window.__libsCallback=async()=>{
       const raw=atob(cached);
       const bytes=new Uint8Array(raw.length);
       for(let i=0;i<raw.length;i++)bytes[i]=raw.charCodeAt(i);
+      await ensureXLSX();
       applyBuffer(bytes.buffer,'SharePoint (cached)');
       const t=sessionStorage.getItem(cacheKeyTime);
       setSpBar(`✓ Cached data — fetched ${t||'earlier'}. Click Refresh for latest.`,'success',false);
@@ -1203,7 +1335,7 @@ window.__libsCallback=async()=>{
   await fetchFromSharePoint();
   document.getElementById('plant-status-bar').dataset.status='loading';
 };
-if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',()=>{if(window.__libs.chartjs)window.__libsCallback();});
+_checkLibsReady();
 
 // ── SharePoint data path ──
   // ══ LEVEL 1 DDS HIGHLIGHTS ═══════════════════════════════════════════════
@@ -1300,7 +1432,7 @@ async function hlLoad() {
   }
 }
 
-NovusDB.ddsHighlights.subscribe(payload => {
+__afterDeferred(()=>NovusDB.ddsHighlights.subscribe(payload => {
   const row = payload.new;
   if (!row) return;
   _hlData[row.dept] = row;
@@ -1312,9 +1444,9 @@ NovusDB.ddsHighlights.subscribe(payload => {
     const ts = new Date(row.updated_at).toLocaleDateString('en-US', { month:'short', day:'numeric', hour:'2-digit', minute:'2-digit' });
     metaEl.textContent = `Updated ${ts} · ${row.updated_by || ''}`;
   }
-});
+}));
 
-hlLoad();
+__afterDeferred(hlLoad);
 
 // ── Admin-managed Custom Widgets ──────────────────────────────────────────
 // Lets anyone with the admin role add a metric card or mini-chart, built
@@ -1354,12 +1486,13 @@ function getAvailableFields(sheetName){
 }
 
 async function loadCustomWidgets(){
-  CUSTOM_WIDGETS = [];
-  if(!window.NovusDB || !window.NovusDB.customWidgets || !window.ACTIVE_PLANT) return;
+  // Swap the list in only once the new one has arrived, so a refresh never blanks the
+  // widgets that are already on screen.
+  if(!window.NovusDB || !window.NovusDB.customWidgets || !window.ACTIVE_PLANT){ CUSTOM_WIDGETS = []; return; }
   try{
     const { data, error } = await NovusDB.customWidgets.getAll(window.ACTIVE_PLANT.id);
-    if(!error && data) CUSTOM_WIDGETS = data;
-  }catch(e){ console.warn('customWidgets load failed (non-fatal):', e); }
+    CUSTOM_WIDGETS = (!error && data) ? data : [];
+  }catch(e){ console.warn('customWidgets load failed (non-fatal):', e); CUSTOM_WIDGETS = []; }
 }
 
 function ensureCustomZone(panelId){
@@ -1642,7 +1775,7 @@ async function cwRemoveWidget(id){
 // add/remove widgets, filtered to the plant this browser is viewing.
 // Guarded the same way as everything else above -- a no-op until
 // supabase-config.js defines NovusDB.customWidgets.subscribe.
-if(window.NovusDB && NovusDB.customWidgets && NovusDB.customWidgets.subscribe){
+__afterDeferred(()=>{ if(window.NovusDB && NovusDB.customWidgets && NovusDB.customWidgets.subscribe){
   NovusDB.customWidgets.subscribe(payload => {
     if(!window.ACTIVE_PLANT) return;
     if(payload.eventType === 'DELETE'){
@@ -1658,7 +1791,7 @@ if(window.NovusDB && NovusDB.customWidgets && NovusDB.customWidgets.subscribe){
     const overlay=document.getElementById('cw-overlay');
     if(overlay && overlay.classList.contains('cw-visible')) cwRenderList();
   });
-}
+}});
 </script>
 
 <!-- Manage Custom Widgets modal (admin-only; opened from ··· More menu) -->
