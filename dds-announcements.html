@@ -217,7 +217,10 @@
 
   async function loadData(){
     const{data,error}=await NovusDB.announcements.getAll(window.ACTIVE_PLANT&&window.ACTIVE_PLANT.id);
-    if(error){console.error(error);return;}
+    if(error){console.error(error);
+      const b=document.getElementById('board');
+      if(b)b.innerHTML='<div style="padding:20px;border:1px solid #f0b4b4;background:#fff5f5;border-radius:10px;color:#8a1f1f;font-size:.9rem;line-height:1.5"><b>Could not load announcements.</b><br>'+String((error&&error.message)||error).replace(/</g,'&lt;')+'<br><span style="opacity:.8">Usually means the Supabase tables / plant_id column are missing, or supabase-config.js has the wrong URL or key. Run sql/01_full_schema.sql in that Supabase project.</span></div>';
+      return;}
     const container=document.getElementById('board');
     if(!data.length){container.innerHTML='<p style="color:var(--ink4);padding:20px;">No announcements yet.</p>';return;}
     container.innerHTML=data.map(item=>{
