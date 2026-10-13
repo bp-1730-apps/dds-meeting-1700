@@ -4,8 +4,24 @@
       "id": "1700",
       "name": "Novus Foods Plant 1700",
       "shortLabel": "Plant 1700",
+      "tabLabel": "1700 Dashboard",
+      "tabGroup": "site1",
       "location": "",
       "dataUrl": "dashboard-data.json",
+      "areas": ["1700"],
+      "lines": []
+    },
+    {
+      "id": "1600",
+      "name": "Novus Foods 1600",
+      "shortLabel": "Plant 1600",
+      "tabLabel": "1600 Dashboard",
+      "tabGroup": "site1",
+      "location": "",
+      "dataUrl": "dashboard-data.json",
+      "areas": ["1600 North", "1600 South"],
+      "sheets": ["Production"],
+      "dbPrefix": "1600:",
       "lines": []
     }
   ]
