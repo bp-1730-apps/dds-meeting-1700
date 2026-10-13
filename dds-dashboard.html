@@ -78,6 +78,7 @@
       document.title = 'DDS Dashboard – ' + plant.name;
       const label = document.querySelector('.psb-plant-label');
       if(label) label.textContent = plant.shortLabel || plant.name;
+      if(typeof buildPlantTabs==='function') buildPlantTabs(plant);
     }
 
     // Start downloading the dashboard data NOW, in parallel with the CDN scripts, instead of
@@ -93,6 +94,13 @@
   <!-- xlsx.full.min.js (~900 KB) is only needed for the manual "Upload XLSX" button; see ensureXLSX() -->
   <script async src="https://cdn.jsdelivr.net/npm/sortablejs@1.15.0/Sortable.min.js" onload="if(window.__dashRendered&&window.initDraggable)initDraggable()"></script>
   <style>
+    /* ── Plant tabs (plants that share a tabGroup in plants.json) ── */
+    .plant-tabs { display:flex; gap:6px; align-items:flex-end; padding:10px 22px 0; background:var(--surface-2); border-bottom:1px solid var(--border); }
+    .plant-tabs[hidden] { display:none; }
+    .pt-tab { padding:8px 18px; border:1px solid var(--border); border-bottom:none; border-radius:8px 8px 0 0; font-size:.82rem; font-weight:700; letter-spacing:.02em; color:var(--text-2); background:rgba(0,0,0,.035); text-decoration:none; position:relative; top:1px; }
+    .pt-tab:hover { background:rgba(0,0,0,.07); }
+    .pt-tab.active { background:var(--surface); color:var(--text); border-bottom:1px solid var(--surface); box-shadow:0 -2px 0 var(--green, #16a34a) inset; }
+    @media (max-width:700px){ .plant-tabs { padding:8px 16px 0; } .pt-tab { padding:7px 12px; } }
     /* ── Level 1 DDS Highlights ── */
     .highlights-grid {
       display: grid;
@@ -440,6 +448,7 @@
 </header>
 
 <!-- ══ PLANT STATUS BAR ═══════════════════════════════════════════════════ -->
+<div class="plant-tabs" id="plant-tabs" hidden></div>
 <div class="plant-status-bar" id="plant-status-bar" data-status="loading">
   <div class="psb-inner">
     <div class="psb-left">
@@ -775,6 +784,50 @@ function groupLinesByArea(lines,areaMap,firstArea){
   return names.map(n=>({area:n,lines:by[n]}));
 }
 function escHtml(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+// ── Plant tabs / per-plant scope ───────────────────────────────────────────
+// plants.json fields used here (all optional):
+//   tabGroup  plants sharing a value get a tab strip under the header
+//   tabLabel  text on the tab ("1700 Dashboard")
+//   areas     keep only Production rows whose Area is in this list
+//   sheets    keep only these sheets from the data file (hides other plants' HR/QA/etc.)
+//   dbPrefix  prefix for this plant's rows in shared Supabase tables keyed by name
+function plantCanView(id){
+  return (window.NovusCore&&typeof NovusCore.canViewPlant==='function')?NovusCore.canViewPlant(id):true;
+}
+function buildPlantTabs(plant){
+  const el=document.getElementById('plant-tabs');if(!el)return;
+  const all=(window.PLANTS_CONFIG&&PLANTS_CONFIG.plants)||[];
+  const grp=plant.tabGroup?all.filter(p=>p.tabGroup===plant.tabGroup&&plantCanView(p.id)):[];
+  if(grp.length<2){el.hidden=true;el.innerHTML='';return;}
+  el.hidden=false;
+  el.innerHTML=grp.map(p=>`<a class="pt-tab${p.id===plant.id?' active':''}" href="?plant=${encodeURIComponent(p.id)}" onclick="switchPlantTab(event,'${escHtml(p.id)}')">${escHtml(p.tabLabel||p.shortLabel||p.name)}</a>`).join('');
+}
+function switchPlantTab(e,id){
+  e.preventDefault();
+  try{localStorage.setItem('novus_active_plant',id);}catch(_){}
+  location.href=location.pathname+'?plant='+encodeURIComponent(id);
+}
+function applyPlantScope(plant){
+  if(Array.isArray(plant.sheets)&&plant.sheets.length){
+    const keep=new Set(plant.sheets.map(s=>String(s).toLowerCase()));
+    Object.keys(_dashData).forEach(k=>{if(!keep.has(k.toLowerCase()))delete _dashData[k];});
+  }
+  if(Array.isArray(plant.areas)&&plant.areas.length&&Array.isArray(_dashData['Production'])){
+    const want=new Set(plant.areas.map(a=>String(a).trim().toLowerCase()));
+    const rows=_dashData['Production'];
+    const hasArea=rows.some(r=>{const a=valByKey(r,'Area');return a!=null&&String(a).trim()!=='';});
+    if(hasArea) _dashData['Production']=rows.filter(r=>{const a=valByKey(r,'Area');return a!=null&&want.has(String(a).trim().toLowerCase());});
+  }
+}
+// Level 1 highlights live in one shared table keyed by department; a plant with a
+// dbPrefix stores its rows as "<prefix><dept>" so plants sharing the table stay separate.
+function hlPrefixes(){return((window.PLANTS_CONFIG&&PLANTS_CONFIG.plants)||[]).map(p=>p.dbPrefix).filter(Boolean);}
+function hlDbKey(dept){return((window.ACTIVE_PLANT&&window.ACTIVE_PLANT.dbPrefix)||'')+dept;}
+function hlFromDb(raw){
+  const mine=(window.ACTIVE_PLANT&&window.ACTIVE_PLANT.dbPrefix)||'';
+  if(mine) return raw.startsWith(mine)?raw.slice(mine.length):null;
+  return hlPrefixes().some(p=>raw.startsWith(p))?null:raw;
+}
 function getLatestDate(data,reqField=null){let max=0;const limit=new Date();limit.setDate(limit.getDate()+7);data.forEach(row=>{const d=parseDate(row.Date);if(!d||isNaN(d.getTime())||d>=limit)return;if(reqField&&(valByKey(row,reqField)==null||valByKey(row,reqField)===''))return;if(d.getTime()>max)max=d.getTime();});if(!max)return null;const obj=new Date(max);return{str:toDS(obj),obj};}
 function setDateEl(id,result){const el=document.getElementById(id);if(!el)return null;if(!result){el.textContent='No Data';el.classList.add('stale');return null;}if(!GLOBAL_MAX_DATE||result.str>GLOBAL_MAX_DATE)GLOBAL_MAX_DATE=result.str;const d=new Date(result.obj.getUTCFullYear(),result.obj.getUTCMonth(),result.obj.getUTCDate());el.textContent=`Data: ${d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}`;return result.str;}
 function checkStale(id,ds){if(!GLOBAL_MAX_DATE||!ds)return;const el=document.getElementById(id);if(!el)return;if(ds<GLOBAL_MAX_DATE){const mD=new Date(GLOBAL_MAX_DATE),sD=new Date(ds),diff=Math.ceil(Math.abs(mD-sD)/864e5);if(mD.getUTCDay()===1&&sD.getUTCDay()===5&&diff<=3)return;el.classList.add('stale');el.textContent+=' ⚠';}else el.classList.remove('stale');}
@@ -807,7 +860,7 @@ function getProdMetrics(prod,apiDs,paDs,line){
     const cilVal=valByKey(r,'CIL');if(cilVal!=null){cilSeen=true;if(yn(cilVal)==='No')cil='No';}
   });
 
-  return{oee:oc?os/oc:null,att:ac?as/ac:null,dt:dtSeen?dt:null,startup:suSeen?su:'—',cil:cilSeen?cil:'—'};
+  return{oee:oc?os/oc:null,att:ac?as/ac:null,dt:dtSeen?dt:null,startup:suSeen?su:'—',cil:cilSeen?cil:'—',hasRow:apiRows.length>0};
 }
 
 function getAggProd(prod,maxPts=30,limitDs){
@@ -895,7 +948,7 @@ function renderDashboard(){
       const m=getProdMetrics(prod,apiDs,paDs,line);
       const oeeN=m.oee!=null?(Number(m.oee)<=2?Number(m.oee):Number(m.oee)/100):null;
       const cls=oeeN==null?'':oeeN<=.60?'td-red':oeeN<.65?'td-amber':'td-green';
-      const tr=document.createElement('tr');tr.innerHTML=`<td style="font-weight:700">${line}</td><td class="${cls}">${pct(m.oee)}</td><td>${pct(m.att,1)}</td><td>${m.dt!=null?m.dt.toFixed(0)+'m':'—'}</td>`;tbody.appendChild(tr);
+      const tr=document.createElement('tr');tr.innerHTML=`<td style="font-weight:700">${line}</td><td class="${cls}">${(!m.hasRow&&window.__l2lRaw)?'<span title="L2L has no record for this line on this date" style="opacity:.55;font-weight:600;font-size:.72rem">No run</span>':pct(m.oee)}</td><td>${pct(m.att,1)}</td><td>${m.dt!=null?m.dt.toFixed(0)+'m':'—'}</td>`;tbody.appendChild(tr);
       const card=document.createElement('div');card.className='readiness-card';card.innerHTML=`<div class="readiness-line">${line}</div><div class="status-pill ${m.startup==='Yes'?'pill-yes':'pill-no'}"><span class="pill-label">STARTUP</span><span>${m.startup==='Yes'?'✓':'✗'}</span></div><div class="status-pill ${m.cil==='Yes'?'pill-yes':'pill-no'}"><span class="pill-label">CIL</span><span>${m.cil==='Yes'?'✓':'✗'}</span></div>`;grid.appendChild(card);
     };
     const grp=groupLinesByArea(lines,lineAreaMap(prod),(window.ACTIVE_PLANT&&window.ACTIVE_PLANT.id)||'');
@@ -1210,7 +1263,10 @@ async function fetchFromSharePoint(){
     if(Array.isArray(_dashData['Production'])){
       const np = normalizeProductionRows(_dashData['Production'], plant.maxDays != null ? Number(plant.maxDays) : null);
       _dashData['Production'] = np.rows;
+      window.__l2lRaw = !!np.converted;   // rows came straight from L2L: a line with no row that day simply didn't run
     }
+
+    applyPlantScope(plant);
 
     // Plants whose config has an l2lDataUrl (Plant 1730 only) get L2L OEE/
     // Downtime/Code Red/Code Yellow from a SEPARATE file that only the L2L
@@ -1305,6 +1361,10 @@ window.__libsCallback=async()=>{
   applyPlantBranding(plant);
 
   NovusCore.requireAuth();
+  if(!plantCanView(plant.id)){
+    const alt=((window.PLANTS_CONFIG&&PLANTS_CONFIG.plants)||[]).find(p=>plantCanView(p.id));
+    if(alt&&alt.id!==plant.id){try{localStorage.setItem('novus_active_plant',alt.id);}catch(_){}location.replace(location.pathname+'?plant='+encodeURIComponent(alt.id));return;}
+  }
   applyRoleAccess();
   markManualOverrides();
   updateClock();setInterval(updateClock,1000);
@@ -1403,7 +1463,7 @@ async function hlSave(dept) {
   const employee  = nameEl?.value?.trim() || '';
   const updatedBy = NovusCore.getUser()?.username || '';
   try {
-    const { error } = await NovusDB.ddsHighlights.upsert(dept, employee, '', updatedBy);
+    const { error } = await NovusDB.ddsHighlights.upsert(hlDbKey(dept), employee, '', updatedBy);
     if (error) throw error;
     _hlData[dept] = { ..._hlData[dept], employee, updated_by: updatedBy, updated_at: new Date().toISOString() };
     if (metaEl) {
@@ -1424,7 +1484,7 @@ async function hlLoad() {
     const { data, error } = await NovusDB.ddsHighlights.getAll();
     if (error) throw error;
     _hlData = {};
-    (data || []).forEach(row => { _hlData[row.dept] = row; });
+    (data || []).forEach(row => { const d = hlFromDb(row.dept); if (d != null) _hlData[d] = { ...row, dept: d }; });
     hlBuildGrid();
   } catch (e) {
     console.error('[hlLoad]', e);
@@ -1433,8 +1493,11 @@ async function hlLoad() {
 }
 
 __afterDeferred(()=>NovusDB.ddsHighlights.subscribe(payload => {
-  const row = payload.new;
+  let row = payload.new;
   if (!row) return;
+  const plainDept = hlFromDb(row.dept);
+  if (plainDept == null) return;
+  row = { ...row, dept: plainDept };
   _hlData[row.dept] = row;
   const key    = row.dept.replace(/[\s|]/g, '-');
   const nameEl = document.getElementById(`hl-name-${key}`);
