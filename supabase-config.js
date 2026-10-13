@@ -22,8 +22,8 @@
  * is the standard pattern for internal tools. Never paste the service_role key.
  */
 
-const SUPABASE_URL      = 'https://YOUR-PROJECT-REF.supabase.co';   // Supabase -> Settings -> API -> Project URL
-const SUPABASE_ANON_KEY = 'YOUR-ANON-PUBLIC-KEY';   // Supabase -> Settings -> API -> anon public (NEVER the service_role key)
+const SUPABASE_URL      = 'https://easfrwilbxypcdooawtt.supabase.co';   // Supabase -> Settings -> API -> Project URL
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVhc2Zyd2lsYnh5cGNkb29hd3R0Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzcwNDk0NDEsImV4cCI6MjA5MjYyNTQ0MX0.Y2kCtATKaMRWWPiE6n0XQ5mGCuq1qS8PnS5OglFxSSM';   // Supabase -> Settings -> API -> anon public (NEVER the service_role key)
 
 // The Supabase JS CDN is loaded by each HTML page. By the time this
 // runs, window.supabase is available.
