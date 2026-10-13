@@ -216,7 +216,9 @@
   async function fetchData(){
     const status=document.getElementById('sync-status');status.textContent='Syncing…';
     const{data,error}=await NovusDB.playCall.getAll(window.ACTIVE_PLANT&&window.ACTIVE_PLANT.id);
-    if(error){status.textContent='Error';console.error(error);return;}
+    if(error){status.textContent='Error';status.title=String((error&&error.message)||error);console.error(error);
+      document.querySelectorAll('.task-list').forEach(l=>{l.innerHTML='<div class="empty-state" style="color:#8a1f1f">Could not load plays: '+String((error&&error.message)||error).replace(/</g,'&lt;')+'<br><small>Usually means the Supabase play_call table / plant_id column is missing, or supabase-config.js has the wrong URL or key. Run sql/01_full_schema.sql in that Supabase project.</small></div>';});
+      return;}
     taskData=data||[];
     try{localStorage.setItem(playCallCacheKey(),JSON.stringify(taskData));}catch(_){}
     render();
