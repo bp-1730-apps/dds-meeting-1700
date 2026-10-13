@@ -37,13 +37,31 @@
       return plant;
     }
 
+
+    function buildPlantSwitch(plant){
+      const el=document.getElementById('plant-switch');if(!el)return;
+      const all=(window.PLANTS_CONFIG&&PLANTS_CONFIG.plants)||[];
+      const grp=plant.tabGroup?all.filter(p=>p.tabGroup===plant.tabGroup):[];
+      if(grp.length<2){el.hidden=true;el.innerHTML='';return;}
+      el.hidden=false;
+      const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+      el.innerHTML=grp.map(p=>'<a href="?plant='+encodeURIComponent(p.id)+'" class="'+(p.id===plant.id?'active':'')+'" onclick="try{localStorage.setItem(\'novus_active_plant\','+JSON.stringify(p.id).replace(/"/g,'&quot;')+')}catch(_){}">'+esc(p.shortLabel||p.tabLabel||p.name)+'</a>').join('');
+    }
+
     function applyPlantBranding(plant){
       document.title = 'DDS Announcements – ' + plant.name;
       const tag = document.getElementById('plant-tag');
       if(tag) tag.textContent = plant.shortLabel || plant.name;
+      buildPlantSwitch(plant);
     }
   </script>
   <style>
+    .plant-switch{display:flex;gap:6px;margin:0 0 18px;flex-wrap:wrap}
+    .plant-switch[hidden]{display:none}
+    .plant-switch a{padding:7px 16px;border:1px solid var(--border,#d9dee5);border-radius:999px;font-size:.8rem;font-weight:700;color:var(--ink3,#566);background:var(--surface,#fff);text-decoration:none}
+    .plant-switch a:hover{background:rgba(0,0,0,.05)}
+    .plant-switch a.active{background:var(--green-xll,#e8f5ec);border-color:var(--green-ll,#9ad3ab);color:var(--green-d,#14532d)}
+
     .page { padding-top:28px; }
     .header-flex { display:flex; justify-content:space-between; align-items:center; margin-bottom:36px; }
     .page-title  { font-size:2rem; font-weight:800; color:var(--ink); letter-spacing:-.03em; }
@@ -167,6 +185,7 @@
 
 
 <div class="page">
+  <div class="plant-switch" id="plant-switch" hidden></div>
   <div class="header-flex">
     <div style="display:flex;align-items:center;">
       <h2 class="page-title">DDS Announcements</h2>
